@@ -1,195 +1,324 @@
-// SPDX-License-Identifier: {{ license }}
-
-use crate::config::Config;
-use crate::fl;
-use cosmic::cosmic_config::{self, CosmicConfigEntry};
-use cosmic::iced::{window::Id, Limits, Subscription};
-use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
+use cosmic::app::{Core, Task};
+use cosmic::iced::core::window;
+use cosmic::iced::window::Id;
+use cosmic::iced::{Length, Rectangle};
 use cosmic::prelude::*;
+use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget;
-use futures_util::SinkExt;
+use cosmic::Element;
+use futures_util::{SinkExt, StreamExt};
 
-/// The application model stores app-specific state used to describe its interface and
-/// drive its logic.
-#[derive(Default)]
-pub struct AppModel {
-    /// Application state which is managed by the COSMIC runtime.
-    core: cosmic::Core,
-    /// The popup id.
-    popup: Option<Id>,
-    /// Configuration data that persists between application runs.
-    config: Config,
-    /// Example row toggler.
-    example_row: bool,
-}
-
-/// Messages emitted by the application and its widgets.
 #[derive(Debug, Clone)]
-pub enum Message {
-    TogglePopup,
+pub enum AppMsg {
     PopupClosed(Id),
-    SubscriptionChannel,
-    UpdateConfig(Config),
-    ToggleExampleRow(bool),
+    ToggleRecording,
+    Surface(cosmic::surface::Action),
+    IpcConnected,
+    IpcDisconnected,
+    IpcState(DaemonState),
 }
 
-/// Create a COSMIC application from the app model
+#[derive(Debug, Clone, PartialEq)]
+pub enum DaemonState {
+    Idle,
+    Recording,
+    Transcribing,
+    ClipboardWritten,
+    Unknown,
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        DaemonState::Idle
+    }
+}
+
+pub struct AppModel {
+    core: Core,
+    popup: Option<Id>,
+    state: DaemonState,
+    connected: bool,
+}
+
+impl Default for AppModel {
+    fn default() -> Self {
+        Self {
+            core: Core::default(),
+            popup: None,
+            state: DaemonState::Idle,
+            connected: false,
+        }
+    }
+}
+
+const SOCKET_PATH: &str = "/run/user/1000/ldsd.sock";
+const APP_ID: &str = "com.byte6d65.lds.CosmicApplet";
+
 impl cosmic::Application for AppModel {
-    /// The async executor that will be used to run your application's commands.
-    type Executor = cosmic::executor::Default;
-
-    /// Data that your application receives to its init method.
+    type Executor = cosmic::SingleThreadExecutor;
     type Flags = ();
+    type Message = AppMsg;
 
-    /// Messages which the application and its widgets will emit.
-    type Message = Message;
+    const APP_ID: &'static str = APP_ID;
 
-    /// Unique identifier in RDNN (reverse domain name notation) format.
-    const APP_ID: &'static str = "{{ appid }}";
-
-    fn core(&self) -> &cosmic::Core {
+    fn core(&self) -> &Core {
         &self.core
     }
 
-    fn core_mut(&mut self) -> &mut cosmic::Core {
+    fn core_mut(&mut self) -> &mut Core {
         &mut self.core
     }
 
-    /// Initializes the application with any given flags and startup commands.
-    fn init(
-        core: cosmic::Core,
-        _flags: Self::Flags,
-    ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        // Construct the app model with the runtime's core.
-        let app = AppModel {
-            core,
-            config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-                .map(|context| match Config::get_entry(&context) {
-                    Ok(config) => config,
-                    Err((_errors, config)) => {
-                        // for why in errors {
-                        //     tracing::error!(%why, "error loading app config");
-                        // }
+    fn init(core: Core, _flags: Self::Flags) -> (Self, Task<AppMsg>) {
+        (AppModel { core, ..Default::default() }, Task::none())
+    }
 
-                        config
-                    }
-                })
-                .unwrap_or_default(),
-            ..Default::default()
+    fn on_close_requested(&self, id: window::Id) -> Option<AppMsg> {
+        Some(AppMsg::PopupClosed(id))
+    }
+
+    fn view(&self) -> Element<'_, AppMsg> {
+        let icon_name = match &self.state {
+            DaemonState::Idle | DaemonState::ClipboardWritten | DaemonState::Unknown => {
+                "audio-input-microphone-symbolic"
+            }
+            DaemonState::Recording => "media-record-symbolic",
+            DaemonState::Transcribing => "content-loading-symbolic",
         };
 
-        (app, Task::none())
-    }
+        let have_popup = self.popup.clone();
 
-    fn on_close_requested(&self, id: Id) -> Option<Message> {
-        Some(Message::PopupClosed(id))
-    }
-
-    /// Describes the interface based on the current state of the application model.
-    ///
-    /// The applet's button in the panel will be drawn using the main view method.
-    /// This view should emit messages to toggle the applet's popup window, which will
-    /// be drawn using the `view_window` method.
-    fn view(&self) -> Element<'_, Self::Message> {
-        self.core
+        let btn = self
+            .core
             .applet
-            .icon_button("display-symbolic")
-            .on_press(Message::TogglePopup)
-            .into()
-    }
-
-    /// The applet's popup window will be drawn using this view method. If there are
-    /// multiple poups, you may match the id parameter to determine which popup to
-    /// create a view for.
-    fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let content_list = widget::list_column()
-            .padding(5)
-            .spacing(0)
-            .add(widget::settings::item(
-                fl!("example-row"),
-                widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
-            ));
-
-        self.core.applet.popup_container(content_list).into()
-    }
-
-    /// Register subscriptions for this application.
-    ///
-    /// Subscriptions are long-lived async tasks running in the background which
-    /// emit messages to the application through a channel. They may be conditionally
-    /// activated by selectively appending to the subscription batch, and will
-    /// continue to execute for the duration that they remain in the batch.
-    fn subscription(&self) -> Subscription<Self::Message> {
-        struct MySubscription;
-
-        Subscription::batch(vec![
-            // Create a subscription which emits updates through a channel.
-            Subscription::run_with_id(
-                std::any::TypeId::of::<MySubscription>(),
-                cosmic::iced::stream::channel(4, move |mut channel| async move {
-                    _ = channel.send(Message::SubscriptionChannel).await;
-
-                    futures_util::future::pending().await
-                }),
-            ),
-            // Watch for application configuration changes.
-            self.core()
-                .watch_config::<Config>(Self::APP_ID)
-                .map(|update| {
-                    // for why in update.errors {
-                    //     tracing::error!(?why, "app config error");
-                    // }
-
-                    Message::UpdateConfig(update.config)
-                }),
-        ])
-    }
-
-    /// Handles messages emitted by the application and its widgets.
-    ///
-    /// Tasks may be returned for asynchronous execution of code in the background
-    /// on the application's async runtime. The application will not exit until all
-    /// tasks are finished.
-    fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
-        match message {
-            Message::SubscriptionChannel => {
-                // For example purposes only.
-            }
-            Message::UpdateConfig(config) => {
-                self.config = config;
-            }
-            Message::ToggleExampleRow(toggled) => self.example_row = toggled,
-            Message::TogglePopup => {
-                return if let Some(p) = self.popup.take() {
-                    destroy_popup(p)
+            .icon_button(icon_name)
+            .on_press_with_rectangle(move |offset, bounds| {
+                if let Some(id) = have_popup.clone() {
+                    AppMsg::Surface(destroy_popup(id))
                 } else {
-                    let new_id = Id::unique();
-                    self.popup.replace(new_id);
-                    let mut popup_settings = self.core.applet.get_popup_settings(
-                        self.core.main_window_id().unwrap(),
-                        new_id,
-                        None,
-                        None,
-                        None,
-                    );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(372.0)
-                        .min_width(300.0)
-                        .min_height(200.0)
-                        .max_height(1080.0);
-                    get_popup(popup_settings)
+                    AppMsg::Surface(app_popup::<AppModel>(
+                        move |app: &mut AppModel| {
+                            let new_id = Id::unique();
+                            app.popup = Some(new_id);
+                            let mut popup_settings = app.core.applet.get_popup_settings(
+                                app.core.main_window_id().unwrap(),
+                                new_id,
+                                None,
+                                None,
+                                None,
+                            );
+                            popup_settings.positioner.anchor_rect = Rectangle {
+                                x: (bounds.x - offset.x) as i32,
+                                y: (bounds.y - offset.y) as i32,
+                                width: bounds.width as i32,
+                                height: bounds.height as i32,
+                            };
+                            popup_settings
+                        },
+                        Some(Box::new(move |app: &AppModel| {
+                            let status_text = match &app.state {
+                                DaemonState::Idle => "Idle",
+                                DaemonState::Recording => "● Recording...",
+                                DaemonState::Transcribing => "Transcribing...",
+                                DaemonState::ClipboardWritten => "✓ Copied",
+                                DaemonState::Unknown => "Unknown",
+                            };
+
+                            let toggle_label = match &app.state {
+                                DaemonState::Idle
+                                | DaemonState::ClipboardWritten
+                                | DaemonState::Unknown => "Start Recording",
+                                DaemonState::Recording | DaemonState::Transcribing => {
+                                    "Stop Recording"
+                                }
+                            };
+
+                            let conn = if app.connected {
+                                "● Connected"
+                            } else {
+                                "○ Offline"
+                            };
+
+                            let content = widget::list_column()
+                                .add(widget::text::body(status_text))
+                                .add(
+                                    widget::button::text(toggle_label)
+                                        .on_press(AppMsg::ToggleRecording),
+                                )
+                                .add(widget::text::caption(conn));
+
+                            Element::from(app.core.applet.popup_container(content))
+                                .map(cosmic::Action::App)
+                        })),
+                    ))
                 }
-            }
-            Message::PopupClosed(id) => {
+            });
+
+        let class = if !self.connected {
+            cosmic::theme::Button::Destructive
+        } else {
+            cosmic::theme::Button::Standard
+        };
+
+        Element::from(
+            self.core
+                .applet
+                .applet_tooltip::<AppMsg>(btn.class(class), "LDS", self.popup.is_some(), |a| {
+                    AppMsg::Surface(a)
+                }, None),
+        )
+    }
+
+    fn view_window(&self, _id: Id) -> Element<'_, AppMsg> {
+        "unused".into()
+    }
+
+    fn subscription(&self) -> cosmic::iced::Subscription<AppMsg> {
+        struct IpcSub;
+        cosmic::iced::Subscription::run_with(std::any::TypeId::of::<IpcSub>(), ipc_subscription)
+    }
+
+    fn update(&mut self, message: AppMsg) -> Task<AppMsg> {
+        match message {
+            AppMsg::PopupClosed(id) => {
                 if self.popup.as_ref() == Some(&id) {
                     self.popup = None;
                 }
+            }
+            AppMsg::ToggleRecording => {
+                let state = self.state.clone();
+                std::thread::spawn(move || {
+                    toggle_recording_sync(&state);
+                });
+            }
+            AppMsg::Surface(a) => {
+                return cosmic::task::message(cosmic::Action::Cosmic(
+                    cosmic::app::Action::Surface(a),
+                ));
+            }
+            AppMsg::IpcConnected => {
+                self.connected = true;
+            }
+            AppMsg::IpcDisconnected => {
+                self.connected = false;
+            }
+            AppMsg::IpcState(state) => {
+                self.state = state;
             }
         }
         Task::none()
     }
 
-    fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
     }
+}
+
+fn ipc_subscription(
+    _: &std::any::TypeId,
+) -> std::pin::Pin<Box<dyn cosmic::iced::futures::Stream<Item = AppMsg> + Send + 'static>> {
+    Box::pin(cosmic::iced::stream::channel(16, |mut tx: cosmic::iced::futures::channel::mpsc::Sender<AppMsg>| async move {
+        loop {
+            let stream = match tokio::net::UnixStream::connect(SOCKET_PATH).await {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = tx.send(AppMsg::IpcDisconnected).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            let (mut ws_sender, mut ws_receiver) =
+                match tokio_tungstenite::client_async("ws://localhost", stream).await {
+                    Ok((ws, _)) => ws.split(),
+                    Err(_) => {
+                        let _ = tx.send(AppMsg::IpcDisconnected).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                };
+
+            let _ = tx.send(AppMsg::IpcConnected).await;
+
+            let req = serde_json::json!({"type": "status", "id": "applet"});
+            let _ = ws_sender
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    req.to_string().into(),
+                ))
+                .await;
+
+            loop {
+                match ws_receiver.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let t = parsed
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if t == "status" || t == "state" {
+                                let state_val = if t == "status" {
+                                    parsed.get("payload").and_then(|p| p.get("state"))
+                                } else {
+                                    parsed.get("payload")
+                                };
+                                if let Some(sv) = state_val {
+                                    let s = match sv.as_str().unwrap_or("Idle") {
+                                        "Recording" => DaemonState::Recording,
+                                        "Transcribing" => DaemonState::Transcribing,
+                                        "ClipboardWritten" => DaemonState::ClipboardWritten,
+                                        _ => DaemonState::Idle,
+                                    };
+                                    let _ = tx.send(AppMsg::IpcState(s)).await;
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(data))) => {
+                        let _ = ws_sender
+                            .send(tokio_tungstenite::tungstenite::Message::Pong(data))
+                            .await;
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
+                        let _ = tx.send(AppMsg::IpcDisconnected).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }))
+}
+
+fn toggle_recording_sync(state: &DaemonState) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok();
+    let Some(rt) = rt else { return };
+
+    rt.block_on(async {
+        let stream = match tokio::net::UnixStream::connect(SOCKET_PATH).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (mut ws, _) = match tokio_tungstenite::client_async("ws://localhost", stream).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let msg_type = match state {
+            DaemonState::Idle | DaemonState::ClipboardWritten | DaemonState::Unknown => {
+                "start_session"
+            }
+            DaemonState::Recording | DaemonState::Transcribing => "stop_session",
+        };
+
+        let msg = serde_json::json!({"type": msg_type, "id": "applet-toggle"});
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into()))
+            .await;
+        let _ = ws.close(None).await;
+    });
 }
