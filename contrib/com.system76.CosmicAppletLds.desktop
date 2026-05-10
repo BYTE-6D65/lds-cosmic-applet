@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=LDS Dictation
+Comment=Liam's Dictation Service — mic state indicator and recording toggle
+Type=Application
+Exec=lds-cosmic-applet
+Icon=audio-input-microphone-symbolic
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Dictation;Speech;Microphone;
+StartupNotify=false
+NoDisplay=true
+X-CosmicApplet=true

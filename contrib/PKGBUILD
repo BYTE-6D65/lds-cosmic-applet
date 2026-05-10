@@ -59,9 +59,9 @@ package() {
   # Binary
   install -Dm755 "target/release/lds-cosmic-applet" "${pkgdir}/usr/bin/lds-cosmic-applet"
 
-  # Desktop file (for COSMIC panel auto-discovery)
-  install -Dm644 "contrib/com.byte6d65.lds.CosmicApplet.desktop" \
-    "${pkgdir}/usr/share/applications/com.byte6d65.lds.CosmicApplet.desktop"
+  # Desktop file (for COSMIC panel auto-discovery via X-CosmicApplet=true)
+  install -Dm644 "contrib/com.system76.CosmicAppletLds.desktop" \
+    "${pkgdir}/usr/share/applications/com.system76.CosmicAppletLds.desktop"
 
   # License
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE" 2>/dev/null || true
