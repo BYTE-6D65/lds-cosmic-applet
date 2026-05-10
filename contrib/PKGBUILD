@@ -1,0 +1,71 @@
+# Maintainer: Byte <byte@militech>
+# Co-maintainer: Annie <annie@militech>
+
+pkgname=lds-cosmic-applet-git
+pkgver=0.1.0.r0.g2ffe3ea
+pkgrel=1
+pkgdesc="LDS dictation service COSMIC panel applet — mic state icon + recording toggle"
+arch=('x86_64')
+url="https://github.com/BYTE-6D65/lds-cosmic-applet"
+license=('MIT')
+groups=('cosmic')
+
+makedepends=(
+  'rust>=1.93'
+  'cargo'
+  'git'
+)
+
+depends=(
+  'ldsd-git'
+  'libcosmic'
+)
+
+optdepends=(
+  'cosmic-session: COSMIC desktop session'
+)
+
+provides=('lds-cosmic-applet')
+conflicts=('lds-cosmic-applet')
+
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${pkgname}"
+  ( set -o pipefail
+    git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+    || printf "0.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  )
+}
+
+prepare() {
+  cd "${srcdir}/${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null \
+    || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${srcdir}/${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+
+  # Binary
+  install -Dm755 "target/release/lds-cosmic-applet" "${pkgdir}/usr/bin/lds-cosmic-applet"
+
+  # Desktop file (for COSMIC panel auto-discovery)
+  install -Dm644 "contrib/com.byte6d65.lds.CosmicApplet.desktop" \
+    "${pkgdir}/usr/share/applications/com.byte6d65.lds.CosmicApplet.desktop"
+
+  # License
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE" 2>/dev/null || true
+
+  # README
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/lds-cosmic-applet/README.md" 2>/dev/null || true
+}
