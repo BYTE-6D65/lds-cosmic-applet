@@ -20,6 +20,7 @@ pub enum AppMsg {
     ConfigReceived(DaemonConfig),
     MinAudioMsChanged(u64),
     VadThresholdChanged(f32),
+    ToggleMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,8 +183,17 @@ impl cosmic::Application for AppModel {
                             // Config sliders (shown when connected)
                             let content = if let Some(ref cfg) = app.config {
                                 let min_audio_f = cfg.min_audio_ms as f64;
+                                let mode_label = if cfg.mode == "streaming" {
+                                    "Mode: Streaming (click for Batch)"
+                                } else {
+                                    "Mode: Batch (click for Streaming)"
+                                };
                                 content
                                     .add(widget::text::body("── Settings ──"))
+                                    .add(
+                                        widget::button::text(mode_label)
+                                            .on_press(AppMsg::ToggleMode),
+                                    )
                                     .add(widget::text::caption(format!("Min audio: {}ms", cfg.min_audio_ms)))
                                     .add(
                                         widget::slider(
@@ -283,6 +293,16 @@ impl cosmic::Application for AppModel {
                     let t = thresh;
                     std::thread::spawn(move || {
                         send_config_update("vad_threshold", &serde_json::json!(t));
+                    });
+                }
+            }
+            AppMsg::ToggleMode => {
+                if let Some(ref mut cfg) = self.config {
+                    let new_mode = if cfg.mode == "streaming" { "batch" } else { "streaming" };
+                    cfg.mode = new_mode.to_string();
+                    let m = new_mode.to_string();
+                    std::thread::spawn(move || {
+                        send_config_update("mode", &serde_json::json!(m));
                     });
                 }
             }
