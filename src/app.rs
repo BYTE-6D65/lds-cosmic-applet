@@ -85,7 +85,7 @@ impl cosmic::Application for AppModel {
             DaemonState::Idle | DaemonState::ClipboardWritten | DaemonState::Unknown => {
                 "audio-input-microphone-symbolic"
             }
-            DaemonState::Recording => "media-record-symbolic",
+            DaemonState::Recording => "lds-recording-symbolic",
             DaemonState::Transcribing => "content-loading-symbolic",
         };
 

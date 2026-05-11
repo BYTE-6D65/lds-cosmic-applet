@@ -63,6 +63,10 @@ package() {
   install -Dm644 "contrib/com.system76.CosmicAppletLds.desktop" \
     "${pkgdir}/usr/share/applications/com.system76.CosmicAppletLds.desktop"
 
+  # Recording indicator icon (red dot)
+  install -Dm644 "contrib/lds-recording-symbolic.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/symbolic/apps/lds-recording-symbolic.svg"
+
   # License
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE" 2>/dev/null || true
 
