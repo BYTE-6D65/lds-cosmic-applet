@@ -17,6 +17,9 @@ pub enum AppMsg {
     IpcDisconnected,
     IpcState(DaemonState),
     IpcTranscript(String),
+    ConfigReceived(DaemonConfig),
+    MinAudioMsChanged(u64),
+    VadThresholdChanged(f32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +30,16 @@ pub enum DaemonState {
     Streaming,
     ClipboardWritten,
     Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonConfig {
+    pub min_audio_ms: u64,
+    pub vad_threshold: f32,
+    pub chunk_interval_ms: u64,
+    pub vad_min_silence_ms: u32,
+    pub mode: String,
+    pub auto_type: bool,
 }
 
 impl Default for DaemonState {
@@ -41,6 +54,7 @@ pub struct AppModel {
     state: DaemonState,
     connected: bool,
     last_transcript: String,
+    config: Option<DaemonConfig>,
 }
 
 impl Default for AppModel {
@@ -51,6 +65,7 @@ impl Default for AppModel {
             state: DaemonState::Idle,
             connected: false,
             last_transcript: String::new(),
+            config: None,
         }
     }
 }
@@ -164,6 +179,31 @@ impl cosmic::Application for AppModel {
                                 )
                                 .add(widget::text::caption(conn));
 
+                            // Config sliders (shown when connected)
+                            let content = if let Some(ref cfg) = app.config {
+                                let min_audio_f = cfg.min_audio_ms as f64;
+                                content
+                                    .add(widget::text::body("── Settings ──"))
+                                    .add(widget::text::caption(format!("Min audio: {}ms", cfg.min_audio_ms)))
+                                    .add(
+                                        widget::slider(
+                                            100.0..=3000.0,
+                                            min_audio_f,
+                                            |v: f64| AppMsg::MinAudioMsChanged(v as u64),
+                                        )
+                                    )
+                                    .add(widget::text::caption(format!("VAD threshold: {:.2}", cfg.vad_threshold)))
+                                    .add(
+                                        widget::slider(
+                                            0.0..=1.0,
+                                            cfg.vad_threshold,
+                                            |v: f32| AppMsg::VadThresholdChanged(v),
+                                        )
+                                    )
+                            } else {
+                                content
+                            };
+
                             Element::from(app.core.applet.popup_container(content))
                                 .map(cosmic::Action::App)
                         })),
@@ -225,6 +265,27 @@ impl cosmic::Application for AppModel {
             AppMsg::IpcTranscript(text) => {
                 self.last_transcript = text;
             }
+            AppMsg::ConfigReceived(cfg) => {
+                self.config = Some(cfg);
+            }
+            AppMsg::MinAudioMsChanged(ms) => {
+                if let Some(ref mut cfg) = self.config {
+                    cfg.min_audio_ms = ms;
+                    let ms_val = ms;
+                    std::thread::spawn(move || {
+                        send_config_update("min_audio_ms", &serde_json::json!(ms_val));
+                    });
+                }
+            }
+            AppMsg::VadThresholdChanged(thresh) => {
+                if let Some(ref mut cfg) = self.config {
+                    cfg.vad_threshold = thresh;
+                    let t = thresh;
+                    std::thread::spawn(move || {
+                        send_config_update("vad_threshold", &serde_json::json!(t));
+                    });
+                }
+            }
         }
         Task::none()
     }
@@ -264,6 +325,14 @@ fn ipc_subscription(
             let _ = ws_sender
                 .send(tokio_tungstenite::tungstenite::Message::Text(
                     req.to_string().into(),
+                ))
+                .await;
+
+            // Also fetch current config
+            let cfg_req = serde_json::json!({"type": "get_config", "id": "applet"});
+            let _ = ws_sender
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    cfg_req.to_string().into(),
                 ))
                 .await;
 
@@ -312,6 +381,20 @@ fn ipc_subscription(
                                     let _ = tx.send(AppMsg::IpcTranscript(text.to_string())).await;
                                 }
                             }
+                            // Handle config response
+                            if t == "config" {
+                                if let Some(payload) = parsed.get("payload") {
+                                    let cfg = DaemonConfig {
+                                        min_audio_ms: payload.get("min_audio_ms").and_then(|v| v.as_u64()).unwrap_or(1500),
+                                        vad_threshold: payload.get("vad_threshold").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+                                        chunk_interval_ms: payload.get("chunk_interval_ms").and_then(|v| v.as_u64()).unwrap_or(2000),
+                                        vad_min_silence_ms: payload.get("vad_min_silence_ms").and_then(|v| v.as_u64()).unwrap_or(500) as u32,
+                                        mode: payload.get("mode").and_then(|v| v.as_str()).unwrap_or("batch").to_string(),
+                                        auto_type: payload.get("auto_type").and_then(|v| v.as_bool()).unwrap_or(true),
+                                    };
+                                    let _ = tx.send(AppMsg::ConfigReceived(cfg)).await;
+                                }
+                            }
                         }
                     }
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(data))) => {
@@ -357,6 +440,38 @@ fn toggle_recording_sync(state: &DaemonState) {
         };
 
         let msg = serde_json::json!({"type": msg_type, "id": "applet-toggle"});
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into()))
+            .await;
+        let _ = ws.close(None).await;
+    });
+}
+
+fn send_config_update(key: &str, value: &serde_json::Value) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok();
+    let Some(rt) = rt else { return };
+
+    let mut payload = serde_json::Map::new();
+    payload.insert(key.to_string(), value.clone());
+
+    rt.block_on(async {
+        let stream = match tokio::net::UnixStream::connect(SOCKET_PATH).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let (mut ws, _) = match tokio_tungstenite::client_async("ws://localhost", stream).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let msg = serde_json::json!({
+            "type": "update_config",
+            "id": "applet-config",
+            "payload": payload,
+        });
         let _ = ws
             .send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string().into()))
             .await;
