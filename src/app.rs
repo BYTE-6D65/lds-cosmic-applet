@@ -206,9 +206,10 @@ impl cosmic::Application for AppModel {
                                     .add(
                                         widget::slider(
                                             0.0..=1.0,
-                                            cfg.vad_threshold,
-                                            |v: f32| AppMsg::VadThresholdChanged(v),
+                                            cfg.vad_threshold as f64,
+                                            |v: f64| AppMsg::VadThresholdChanged(v as f32),
                                         )
+                                        .step(0.01)
                                     )
                             } else {
                                 content
