@@ -16,6 +16,7 @@ pub enum AppMsg {
     IpcConnected,
     IpcDisconnected,
     IpcState(DaemonState),
+    IpcTranscript(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,7 @@ pub struct AppModel {
     popup: Option<Id>,
     state: DaemonState,
     connected: bool,
+    last_transcript: String,
 }
 
 impl Default for AppModel {
@@ -47,6 +49,7 @@ impl Default for AppModel {
             popup: None,
             state: DaemonState::Idle,
             connected: false,
+            last_transcript: String::new(),
         }
     }
 }
@@ -120,7 +123,13 @@ impl cosmic::Application for AppModel {
                                 DaemonState::Idle => "Idle",
                                 DaemonState::Recording => "● Recording...",
                                 DaemonState::Transcribing => "Transcribing...",
-                                DaemonState::ClipboardWritten => "✓ Copied",
+                                DaemonState::ClipboardWritten => {
+                                    if app.last_transcript.is_empty() {
+                                        "✓ Copied"
+                                    } else {
+                                        "✓ Copied — see transcript"
+                                    }
+                                }
                                 DaemonState::Unknown => "Unknown",
                             };
 
@@ -139,8 +148,15 @@ impl cosmic::Application for AppModel {
                                 "○ Offline"
                             };
 
+                            let transcript_preview = if !app.last_transcript.is_empty() {
+                                app.last_transcript.clone()
+                            } else {
+                                String::new()
+                            };
+
                             let content = widget::list_column()
                                 .add(widget::text::body(status_text))
+                                .add(widget::text::caption(transcript_preview))
                                 .add(
                                     widget::button::text(toggle_label)
                                         .on_press(AppMsg::ToggleRecording),
@@ -204,6 +220,9 @@ impl cosmic::Application for AppModel {
             }
             AppMsg::IpcState(state) => {
                 self.state = state;
+            }
+            AppMsg::IpcTranscript(text) => {
+                self.last_transcript = text;
             }
         }
         Task::none()
@@ -269,6 +288,10 @@ fn ipc_subscription(
                                         _ => DaemonState::Idle,
                                     };
                                     let _ = tx.send(AppMsg::IpcState(s)).await;
+                                }
+                            } else if t == "final_transcript" {
+                                if let Some(text) = parsed.get("payload").and_then(|p| p.get("text")).and_then(|v| v.as_str()) {
+                                    let _ = tx.send(AppMsg::IpcTranscript(text.to_string())).await;
                                 }
                             }
                         }
