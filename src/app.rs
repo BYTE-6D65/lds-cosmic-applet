@@ -24,6 +24,7 @@ pub enum DaemonState {
     Idle,
     Recording,
     Transcribing,
+    Streaming,
     ClipboardWritten,
     Unknown,
 }
@@ -85,7 +86,7 @@ impl cosmic::Application for AppModel {
             DaemonState::Idle | DaemonState::ClipboardWritten | DaemonState::Unknown => {
                 "audio-input-microphone-symbolic"
             }
-            DaemonState::Recording => "lds-recording-symbolic",
+            DaemonState::Recording | DaemonState::Streaming => "lds-recording-symbolic",
             DaemonState::Transcribing => "content-loading-symbolic",
         };
 
@@ -121,7 +122,7 @@ impl cosmic::Application for AppModel {
                         Some(Box::new(move |app: &AppModel| {
                             let status_text = match &app.state {
                                 DaemonState::Idle => "Idle",
-                                DaemonState::Recording => "● Recording...",
+                                DaemonState::Recording | DaemonState::Streaming => "● Recording...",
                                 DaemonState::Transcribing => "Transcribing...",
                                 DaemonState::ClipboardWritten => {
                                     if app.last_transcript.is_empty() {
@@ -137,7 +138,7 @@ impl cosmic::Application for AppModel {
                                 DaemonState::Idle
                                 | DaemonState::ClipboardWritten
                                 | DaemonState::Unknown => "Start Recording",
-                                DaemonState::Recording | DaemonState::Transcribing => {
+                                DaemonState::Recording | DaemonState::Streaming | DaemonState::Transcribing => {
                                     "Stop Recording"
                                 }
                             };
@@ -281,11 +282,28 @@ fn ipc_subscription(
                                     parsed.get("payload")
                                 };
                                 if let Some(sv) = state_val {
-                                    let s = match sv.as_str().unwrap_or("Idle") {
-                                        "Recording" => DaemonState::Recording,
-                                        "Transcribing" => DaemonState::Transcribing,
-                                        "ClipboardWritten" => DaemonState::ClipboardWritten,
-                                        _ => DaemonState::Idle,
+                                    // Handle both string variants ("Recording") and
+                                    // object variants ({"Streaming":{"partial_text":"..."}})
+                                    let s = if sv.is_string() {
+                                        match sv.as_str().unwrap_or("Idle") {
+                                            "Recording" => DaemonState::Recording,
+                                            "Transcribing" => DaemonState::Transcribing,
+                                            "ClipboardWritten" => DaemonState::ClipboardWritten,
+                                            _ => DaemonState::Idle,
+                                        }
+                                    } else if sv.is_object() {
+                                        // Struct variants like Streaming
+                                        if sv.get("Streaming").is_some() {
+                                            DaemonState::Streaming
+                                        } else if sv.get("Recording").is_some() {
+                                            DaemonState::Recording
+                                        } else if sv.get("Transcribing").is_some() {
+                                            DaemonState::Transcribing
+                                        } else {
+                                            DaemonState::Idle
+                                        }
+                                    } else {
+                                        DaemonState::Idle
                                     };
                                     let _ = tx.send(AppMsg::IpcState(s)).await;
                                 }
@@ -335,7 +353,7 @@ fn toggle_recording_sync(state: &DaemonState) {
             DaemonState::Idle | DaemonState::ClipboardWritten | DaemonState::Unknown => {
                 "start_session"
             }
-            DaemonState::Recording | DaemonState::Transcribing => "stop_session",
+            DaemonState::Recording | DaemonState::Streaming | DaemonState::Transcribing => "stop_session",
         };
 
         let msg = serde_json::json!({"type": msg_type, "id": "applet-toggle"});
